@@ -53,6 +53,7 @@
 #   - main
 #   - process_kmer_distribution  
 #   - process_kraken_report 
+#   - check_report_file
 #
 #####################################################################
 import os, sys, argparse
@@ -153,11 +154,35 @@ def process_kraken_report(curr_str):
     level_num = int(spaces/2)
     return [name, taxid, level_num, level_type, all_reads, level_reads]
     
+#check_report_file
+#usage: checks the format of the report file. 
+#   - cannot be kraken output file
+#   - cannot be mpa style 
+#   - expect number of columns?
+#input: name of input file 
+#returns: 0 for correct, 1 for incorrect
+def check_report_file(in_file):
+    sys.stderr.write(">> Checking report file: %s\n" % in_file)   
+    r_file = open(in_file,'r')
+    first_line = r_file.readline() 
+    #Test for kraken output file
+    if first_line[0] == "C" or first_line[0] == "U":
+        sys.stderr.write("\tERROR: Bracken does not use the Kraken default output.\n") 
+        sys.stderr.write("\t       Bracken requires the Kraken report file (--report option with Kraken)\n") 
+        exit(1) 
+    #Test for mpa style 
+    if len(first_line.split("\t")) == 2:
+        sys.stderr.write("\tERROR: Bracken is not compatible with mpa-style reports.\n")
+        sys.stderr.write("\t       Bracken requires the default Kraken report format\n") 
+        exit(1)
+    r_file.close() 
+    return(0)
+    
 #Main method 
 def main():
     #Parse arguments
     parser = argparse.ArgumentParser() 
-    parser.add_argument('-i' ,'--input', dest='input', required=True,
+    parser.add_argument('-i' ,'--input', dest='in_file', required=True,
         help='Input kraken report file.')
     parser.add_argument('-k', '--kmer_distr', dest='kmer_distr', required=True,
         help='Kmer distribution file.')
@@ -212,8 +237,11 @@ def main():
     lvl_nodes = []
     leaf_nodes = []
 
-    #Parse kraken report file and create tree 
-    i_file = open(args.input, 'r')
+    #Error Check
+    check_report_file(args.in_file) 
+
+    #Parse kraken report file /and create tree 
+    i_file = open(args.in_file, 'r')
     map2lvl_taxids = {}
     lvl_taxids = {} 
     last_taxid = -1
@@ -262,16 +290,19 @@ def main():
                 #If level contains enough reads - save for abundance estimation
                 n_lvl_est += 1
                 kept_reads += all_reads
-                lvl_taxids[taxid] = [name, all_reads, level_reads, 0]
+                #lvl_taxids[taxid] = [name, all_reads, level_reads, 0]
+                lvl_taxids[taxid] = [name, all_reads, 0, 0]
                 last_taxid = taxid
-                map2lvl_taxids[taxid] = [taxid, all_reads, 0]
+                #also distribute level reads....
+                map2lvl_taxids[taxid] = [taxid, level_reads, 0]
         elif (branch > 0 and test_branch > branch):
+            #For all nodes below desired level 
             if last_taxid != -1:
-                map2lvl_taxids[taxid] = [last_taxid, all_reads,0]
+                map2lvl_taxids[taxid] = [last_taxid, level_reads,0]
         elif main_lvls.index(level_id[0]) >= branch_lvl:
             #For all nodes below the desired level 
             if last_taxid != -1:
-                map2lvl_taxids[taxid] = [last_taxid, all_reads,0]
+                map2lvl_taxids[taxid] = [last_taxid, level_reads,0]
         #Add node to tree
         curr_node = Tree(name, taxid, level_num, level_id, all_reads, level_reads, None, prev_node)
         prev_node.add_child(curr_node)
@@ -290,20 +321,22 @@ def main():
         kmer_distr_dict[mapped_taxid] = mapped_taxid_dict
     k_file.close() 
 
-    #For each current parent node, distribute level reads to genomes
+    #For each node, distribute level reads to genomes
     curr_nodes = [root_node]
     nondistributed_reads = 0
     distributed_reads = 0
     lvl_reads = 0
     while len(curr_nodes) > 0:
         curr_node = curr_nodes.pop(0)
-        #For each child node, if not at level, add to list of nodes to evaluate 
+        #For each child node, add to list of nodes to evaluate 
+        if not isinstance(curr_node,Tree):
+            continue 
         for child_node in curr_node.children:
-            if child_node.level_id != args.level:
-                curr_nodes.append(child_node) 
-        #If no level taxids (or below) produce this classification 
+            curr_nodes.append(child_node) 
+        #No reads to distribute 
         if curr_node.lvl_reads == 0:
             continue 
+        #No genomes produce this classification
         if curr_node.taxid not in kmer_distr_dict:
             #print curr_node.name
             nondistributed_reads += curr_node.lvl_reads
@@ -363,9 +396,13 @@ def main():
     sum_all_reads = 0
     for taxid in lvl_taxids:
         [name, all_reads, lvl_reads, added_reads] = lvl_taxids[taxid]
-        new_all_reads = float(all_reads) + float(added_reads)
+        #new_all_reads = float(all_reads) + float(added_reads)
+        new_all_reads = float(added_reads)
         sum_all_reads += new_all_reads
 
+    if sum_all_reads == 0:
+        sys.stderr.write("Error: no reads found. Please check your Kraken report\n")
+        exit(1) 
     #Print for each classification level: 
     #   - name, taxonomy ID, taxonomy level
     #   - kraken assigned reads, added reads, estimated reads, and fraction total reads 
@@ -374,7 +411,8 @@ def main():
     for taxid in lvl_taxids:
         [name, all_reads, lvl_reads, added_reads] = lvl_taxids[taxid]
         #Count up all added reads + all_reads already at the level
-        new_all_reads = float(all_reads) + float(added_reads)
+        #new_all_reads = float(all_reads) + float(added_reads)
+        new_all_reads = float(added_reads)
         #Output
         o_file.write(name + '\t')
         o_file.write(taxid + '\t')
@@ -386,7 +424,7 @@ def main():
     o_file.close()
     
     #Print to screen
-    print("BRACKEN SUMMARY (Kraken report: %s)" % args.input)
+    print("BRACKEN SUMMARY (Kraken report: %s)" % args.in_file)
     print("    >>> Threshold: %i " % int(args.thresh))
     print("    >>> Number of %s in sample: %i " % (abundance_lvl, n_lvl_total))
     print("\t  >> Number of %s with reads > threshold: %i " % (abundance_lvl, n_lvl_est))
@@ -409,6 +447,8 @@ def main():
     new_reads = {}
     total_reads = 0
     for curr_leaf in leaf_nodes:
+        if not isinstance(curr_leaf, Tree):
+            continue
         #Move to estimation level
         curr_node = curr_leaf
         skip = False
@@ -421,7 +461,8 @@ def main():
         #Determine number of reads to add OR skip 
         if curr_node.taxid in lvl_taxids:
             [name, all_reads, lvl_reads, added_reads] = lvl_taxids[curr_node.taxid]
-            new_total = added_reads + all_reads 
+            #new_total = added_reads + all_reads 
+            new_total = added_reads  
         else: 
             continue 
         #If this level tree already traversed, do not traverse
@@ -442,7 +483,7 @@ def main():
             new_reads[curr_node.taxid] += new_total 
             curr_node.all_reads += new_total
     #Print modified kraken report 
-    new_report, extension = os.path.splitext(args.input)
+    new_report, extension = os.path.splitext(args.in_file)
     r_file = ''
     if args.report_new == '':
         r_file = open(new_report + '_bracken_' + abundance_lvl + extension , 'w')
